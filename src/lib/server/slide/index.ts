@@ -10,3 +10,10 @@ export {
 	type SlideValidationInput,
 	type SlideValidationResult
 } from './validate';
+export {
+	buildFeedbackPromptEnhancement,
+	sanitizeFeedbackComment,
+	type FeedbackPromptEnhancement,
+	type SlideFeedbackInput,
+	type SlideFeedbackReason
+} from './feedback';

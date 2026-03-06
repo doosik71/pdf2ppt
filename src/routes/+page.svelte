@@ -45,6 +45,21 @@
 		usedContextVersion?: number;
 	};
 
+	type SlideFeedbackReason = 'STYLE_MISMATCH' | 'CONTENT_MISMATCH' | 'HTML_BROKEN';
+
+	type SlideFeedbackResult = {
+		feedbackId: string;
+		documentId: string;
+		selectedTocItemId: string;
+		liked: boolean;
+		reason?: SlideFeedbackReason;
+		regeneration: {
+			goalPromptPatch: string;
+			themePromptPatch: string;
+			shouldResetContext: boolean;
+		};
+	};
+
 	type ThemePreset = {
 		id: string;
 		name: string;
@@ -85,6 +100,54 @@
 			name: 'Mono Gray',
 			description: 'Minimal monochrome style for reports',
 			colors: ['#111827', '#6b7280', '#f3f4f6']
+		},
+		{
+			id: 'midnight-teal',
+			name: 'Midnight Teal',
+			description: 'Deep teal contrast for strategy updates',
+			colors: ['#042f2e', '#0f766e', '#ccfbf1']
+		},
+		{
+			id: 'royal-maroon',
+			name: 'Royal Maroon',
+			description: 'Premium maroon tone for board-level reports',
+			colors: ['#4c0519', '#be123c', '#ffe4e6']
+		},
+		{
+			id: 'ocean-ice',
+			name: 'Ocean Ice',
+			description: 'Fresh cyan palette for product demos',
+			colors: ['#083344', '#0891b2', '#cffafe']
+		},
+		{
+			id: 'sand-stone',
+			name: 'Sand Stone',
+			description: 'Warm neutral palette for policy documents',
+			colors: ['#44403c', '#a16207', '#fef3c7']
+		},
+		{
+			id: 'violet-night',
+			name: 'Violet Night',
+			description: 'Strong violet contrast for roadmap storytelling',
+			colors: ['#2e1065', '#7c3aed', '#ede9fe']
+		},
+		{
+			id: 'ruby-carbon',
+			name: 'Ruby Carbon',
+			description: 'Dark carbon base with ruby accents for risk briefings',
+			colors: ['#1f2937', '#dc2626', '#fee2e2']
+		},
+		{
+			id: 'mint-slate',
+			name: 'Mint Slate',
+			description: 'Soft mint highlights for educational material',
+			colors: ['#134e4a', '#14b8a6', '#ccfbf1']
+		},
+		{
+			id: 'cobalt-gold',
+			name: 'Cobalt Gold',
+			description: 'Cobalt and gold mix for keynote narratives',
+			colors: ['#172554', '#ca8a04', '#fef9c3']
 		}
 	];
 
@@ -120,6 +183,38 @@
 			audience: 'Potential clients',
 			purpose: 'Persuade and convert',
 			tone: 'Confident and value-focused'
+		},
+		{
+			id: 'startup-demo',
+			name: 'Startup Demo',
+			speaker: 'Founder',
+			audience: 'Investors',
+			purpose: 'Show traction and vision',
+			tone: 'Energetic and concise'
+		},
+		{
+			id: 'policy-briefing',
+			name: 'Policy Briefing',
+			speaker: 'Analyst',
+			audience: 'Public stakeholders',
+			purpose: 'Explain policy implications',
+			tone: 'Neutral and structured'
+		},
+		{
+			id: 'training-workshop',
+			name: 'Training Workshop',
+			speaker: 'Facilitator',
+			audience: 'Practitioners',
+			purpose: 'Enable hands-on execution',
+			tone: 'Practical and stepwise'
+		},
+		{
+			id: 'incident-review',
+			name: 'Incident Review',
+			speaker: 'Incident commander',
+			audience: 'Engineering leadership',
+			purpose: 'Analyze failure and actions',
+			tone: 'Direct and accountable'
 		}
 	];
 
@@ -129,23 +224,35 @@
 	let isSummarizing = false;
 	let isGeneratingToc = false;
 	let isGeneratingSlide = false;
-	let lastFailedAction: 'upload' | 'summary' | 'toc' | 'slide' | null = null;
+	let isSubmittingFeedback = false;
+	let lastFailedAction: 'upload' | 'summary' | 'toc' | 'slide' | 'feedback' | null = null;
 
 	let uploadError = '';
 	let summaryError = '';
 	let tocError = '';
 	let slideError = '';
+	let feedbackError = '';
+	let feedbackSuccess = '';
 
 	let parseResult: ParseResult | null = null;
 	let summaryResult: SummaryResult | null = null;
 	let tocResult: TocResult | null = null;
 	let slideResult: SlideGenerateResult | null = null;
+	let feedbackResult: SlideFeedbackResult | null = null;
 
 	let selectedTocItemId: string | null = null;
 	let selectedThemeId = themePresets[0].id;
 	let selectedStyleId = stylePresets[0].id;
+	let isThemeSectionCollapsed = false;
+	let isStyleSectionCollapsed = false;
+	let selectedDislikeReason: SlideFeedbackReason | null = null;
+	let feedbackComment = '';
+	let feedbackGoalPromptPatch = '';
+	let feedbackThemePromptPatch = '';
+	let slideContextVersion = 0;
+	let lastFeedbackPayload: { liked: boolean; reason?: SlideFeedbackReason; comment?: string } | null = null;
 
-	$: isBusy = isUploading || isSummarizing || isGeneratingToc || isGeneratingSlide;
+	$: isBusy = isUploading || isSummarizing || isGeneratingToc || isGeneratingSlide || isSubmittingFeedback;
 	$: busyLabel = isUploading
 		? 'Uploading and parsing PDF...'
 		: isSummarizing
@@ -154,7 +261,27 @@
 				? 'Generating table of contents...'
 				: isGeneratingSlide
 					? 'Generating slide preview...'
+					: isSubmittingFeedback
+						? 'Submitting feedback...'
 					: '';
+
+	function logApiError(
+		action: string,
+		responseStatus: number | null,
+		payload: unknown,
+		requestBody: unknown
+	) {
+		const error = (payload as { error?: Record<string, unknown> } | null)?.error;
+		console.group(`[${action}] API request failed`);
+		console.error('HTTP status:', responseStatus ?? 'unknown');
+		console.error('Request body:', requestBody);
+		console.error('Error message:', error?.message ?? 'unknown');
+		if (error?.code) console.error('Error code:', error.code);
+		if (error?.requestId) console.error('Request ID:', error.requestId);
+		if (error?.details !== undefined) console.error('Error details:', error.details);
+		console.error('Raw payload:', payload);
+		console.groupEnd();
+	}
 
 	function formatBytes(bytes: number): string {
 		if (bytes < 1024) return `${bytes} B`;
@@ -162,14 +289,44 @@
 		return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 	}
 
+	function sanitizeFeedbackComment(rawComment: string): string {
+		const withoutScriptTags = rawComment.replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, ' ');
+		const withoutHtmlTags = withoutScriptTags.replace(/<\/?[^>]+>/g, ' ');
+		const withoutCodeFences = withoutHtmlTags.replace(/```[\s\S]*?```/g, ' ');
+		const flattened = withoutCodeFences.replace(/\s+/g, ' ').trim();
+		return flattened.slice(0, 500);
+	}
+
+	function downloadSlideHtml() {
+		if (!slideResult) return;
+		const blob = new Blob([slideResult.renderedHtml], { type: 'text/html;charset=utf-8' });
+		const url = URL.createObjectURL(blob);
+		const anchor = document.createElement('a');
+		anchor.href = url;
+		anchor.download = `slide-${slideResult.selectedTocItemId}.html`;
+		document.body.appendChild(anchor);
+		anchor.click();
+		anchor.remove();
+		URL.revokeObjectURL(url);
+	}
+
 	function resetAllResults() {
 		summaryResult = null;
 		tocResult = null;
 		slideResult = null;
+		feedbackResult = null;
 		selectedTocItemId = null;
 		summaryError = '';
 		tocError = '';
 		slideError = '';
+		feedbackError = '';
+		feedbackSuccess = '';
+		selectedDislikeReason = null;
+		feedbackComment = '';
+		feedbackGoalPromptPatch = '';
+		feedbackThemePromptPatch = '';
+		slideContextVersion = 0;
+		lastFeedbackPayload = null;
 		lastFailedAction = null;
 	}
 
@@ -286,32 +443,35 @@
 		tocResult = null;
 		slideResult = null;
 		selectedTocItemId = null;
+		const requestBody = {
+			documentId: parseResult.documentId,
+			fullText: parseResult.fullText,
+			summary: summaryResult?.summary,
+			pageMap: parseResult.pageMap,
+			language: 'ko'
+		};
 
 		try {
 			const response = await fetch('/api/toc', {
 				method: 'POST',
 				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify({
-					documentId: parseResult.documentId,
-					fullText: parseResult.fullText,
-					summary: summaryResult?.summary,
-					pageMap: parseResult.pageMap,
-					language: 'ko'
-				})
+				body: JSON.stringify(requestBody)
 			});
 			const payload = await response.json();
 
 			if (!response.ok || !payload?.ok) {
 				tocError = payload?.error?.message ?? 'Failed to generate table of contents.';
 				lastFailedAction = 'toc';
+				logApiError('Generate TOC', response.status, payload, requestBody);
 				return;
 			}
 
 			tocResult = payload.data as TocResult;
 			selectedTocItemId = tocResult.tocItems[0]?.id ?? null;
-		} catch {
+		} catch (error) {
 			tocError = 'An error occurred while generating table of contents.';
 			lastFailedAction = 'toc';
+			logApiError('Generate TOC', null, { error: { message: String(error) } }, requestBody);
 		} finally {
 			isGeneratingToc = false;
 		}
@@ -329,39 +489,57 @@
 		].join('\n');
 	}
 
+	function buildGoalPrompt() {
+		const base = 'Generate one slide for the selected TOC item with concise and factual content.';
+		return [base, feedbackGoalPromptPatch].filter(Boolean).join('\n');
+	}
+
+	function buildThemePrompt() {
+		return [buildStylePrompt(), feedbackThemePromptPatch].filter(Boolean).join('\n');
+	}
+
 	async function generateSlidePreview() {
 		if (!parseResult || !summaryResult || !tocResult || !selectedTocItemId || isGeneratingSlide) return;
 
 		isGeneratingSlide = true;
 		slideError = '';
 		slideResult = null;
+		const requestBody = {
+			documentId: parseResult.documentId,
+			fullText: parseResult.fullText,
+			summary: summaryResult.summary,
+			tocItems: tocResult.tocItems,
+			selectedTocItemId,
+			themeId: selectedThemeId,
+			goalPrompt: buildGoalPrompt(),
+			themePrompt: buildThemePrompt(),
+			contextVersion: slideContextVersion
+		};
 
 		try {
 			const response = await fetch('/api/slide/generate', {
 				method: 'POST',
 				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify({
-					documentId: parseResult.documentId,
-					fullText: parseResult.fullText,
-					summary: summaryResult.summary,
-					tocItems: tocResult.tocItems,
-					selectedTocItemId,
-					themeId: selectedThemeId,
-					themePrompt: buildStylePrompt()
-				})
+				body: JSON.stringify(requestBody)
 			});
 			const payload = await response.json();
 
 			if (!response.ok || !payload?.ok) {
 				slideError = payload?.error?.message ?? 'Failed to generate slide preview.';
 				lastFailedAction = 'slide';
+				logApiError('Generate Slide', response.status, payload, requestBody);
 				return;
 			}
 
 			slideResult = payload.data as SlideGenerateResult;
-		} catch {
+			feedbackError = '';
+			feedbackSuccess = '';
+			feedbackResult = null;
+			selectedDislikeReason = null;
+		} catch (error) {
 			slideError = 'An error occurred while generating slide preview.';
 			lastFailedAction = 'slide';
+			logApiError('Generate Slide', null, { error: { message: String(error) } }, requestBody);
 		} finally {
 			isGeneratingSlide = false;
 		}
@@ -382,6 +560,14 @@
 		}
 		if (lastFailedAction === 'slide') {
 			void generateSlidePreview();
+			return;
+		}
+		if (lastFailedAction === 'feedback' && lastFeedbackPayload) {
+			void submitFeedback(
+				lastFeedbackPayload.liked,
+				lastFeedbackPayload.reason,
+				lastFeedbackPayload.comment
+			);
 		}
 	}
 
@@ -389,24 +575,92 @@
 		selectedTocItemId = itemId;
 		slideResult = null;
 		slideError = '';
+		feedbackResult = null;
+		feedbackError = '';
+		feedbackSuccess = '';
+		selectedDislikeReason = null;
+		feedbackComment = '';
 	}
 
 	function selectTheme(themeId: string) {
 		selectedThemeId = themeId;
 		slideResult = null;
 		slideError = '';
+		feedbackResult = null;
+		feedbackError = '';
+		feedbackSuccess = '';
 	}
 
 	function selectStyle(styleId: string) {
 		selectedStyleId = styleId;
 		slideResult = null;
 		slideError = '';
+		feedbackResult = null;
+		feedbackError = '';
+		feedbackSuccess = '';
+	}
+
+	function toggleThemeSection() {
+		isThemeSectionCollapsed = !isThemeSectionCollapsed;
+	}
+
+	function toggleStyleSection() {
+		isStyleSectionCollapsed = !isStyleSectionCollapsed;
+	}
+
+	async function submitFeedback(liked: boolean, reason?: SlideFeedbackReason, comment?: string) {
+		if (!parseResult || !slideResult || !selectedTocItemId || isSubmittingFeedback) return;
+		if (!liked && !reason) {
+			feedbackError = 'Please select a dislike reason.';
+			return;
+		}
+		const sanitizedComment = sanitizeFeedbackComment(comment ?? feedbackComment);
+
+		isSubmittingFeedback = true;
+		feedbackError = '';
+		feedbackSuccess = '';
+		lastFeedbackPayload = { liked, reason, comment: sanitizedComment };
+
+		try {
+			const response = await fetch('/api/slide/feedback', {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({
+					documentId: parseResult.documentId,
+					selectedTocItemId,
+					liked,
+					reason,
+					comment: sanitizedComment || undefined
+				})
+			});
+			const payload = await response.json();
+			if (!response.ok || !payload?.ok) {
+				feedbackError = payload?.error?.message ?? 'Failed to submit feedback.';
+				lastFailedAction = 'feedback';
+				return;
+			}
+
+			feedbackResult = payload.data as SlideFeedbackResult;
+			feedbackGoalPromptPatch = feedbackResult.regeneration.goalPromptPatch;
+			feedbackThemePromptPatch = feedbackResult.regeneration.themePromptPatch;
+			if (feedbackResult.regeneration.shouldResetContext) {
+				slideContextVersion += 1;
+			}
+			feedbackSuccess = liked
+				? 'Feedback saved. Current style will be preserved.'
+				: 'Feedback saved. Regeneration prompt has been strengthened.';
+		} catch {
+			feedbackError = 'An error occurred while submitting feedback.';
+			lastFailedAction = 'feedback';
+		} finally {
+			isSubmittingFeedback = false;
+		}
 	}
 </script>
 
 <main class="mx-auto min-h-screen w-full max-w-5xl px-4 py-10">
 	<section class="mb-6">
-		<h1 class="text-3xl font-bold tracking-tight text-slate-900">PDF2PPT</h1>
+		<h1 class="text-3xl font-bold tracking-tight text-slate-900">PPT2Slide</h1>
 		<p class="mt-2 text-sm text-slate-600">Upload a PDF and generate analysis outputs step by step.</p>
 	</section>
 
@@ -491,8 +745,128 @@
 	</section>
 
 	<section class="mt-6 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+		<div class="flex items-start justify-between gap-3">
+			<div>
+				<h2 class="text-lg font-semibold text-slate-900">3. Theme Selection</h2>
+				<p class="mt-2 text-sm text-slate-600">Choose a color theme for generated slides.</p>
+			</div>
+			<button
+				type="button"
+				class="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+				on:click={toggleThemeSection}
+				aria-expanded={!isThemeSectionCollapsed}
+			>
+				{isThemeSectionCollapsed ? 'Expand' : 'Shrink'}
+			</button>
+		</div>
+		{#if !isThemeSectionCollapsed}
+			<div class="mt-4 grid gap-3 sm:grid-cols-2">
+				{#each themePresets as theme}
+					<button type="button" class={`rounded-lg border p-4 text-left transition ${selectedThemeId === theme.id ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-200' : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50'}`} on:click={() => selectTheme(theme.id)}>
+						<div class="flex items-center justify-between gap-3">
+							<p class="text-sm font-semibold text-slate-900">{theme.name}</p>
+							{#if selectedThemeId === theme.id}<span class="rounded bg-blue-600 px-2 py-0.5 text-xs font-medium text-white">Selected</span>{/if}
+						</div>
+						<p class="mt-1 text-xs text-slate-600">{theme.description}</p>
+						<div class="mt-3 flex gap-2">
+							{#each theme.colors as color}<span class="h-6 flex-1 rounded" style={`background-color: ${color}`}></span>{/each}
+						</div>
+					</button>
+				{/each}
+			</div>
+		{/if}
+		<p class="mt-3 text-xs text-slate-500">Current theme: {themePresets.find((theme) => theme.id === selectedThemeId)?.name}</p>
+	</section>
+
+	<section class="mt-6 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+		<div class="flex items-start justify-between gap-3">
+			<div>
+				<h2 class="text-lg font-semibold text-slate-900">4. Style Selection</h2>
+				<p class="mt-2 text-sm text-slate-600">Choose a presentation style based on speaker, audience, and purpose.</p>
+			</div>
+			<button
+				type="button"
+				class="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+				on:click={toggleStyleSection}
+				aria-expanded={!isStyleSectionCollapsed}
+			>
+				{isStyleSectionCollapsed ? 'Expand' : 'Shrink'}
+			</button>
+		</div>
+		{#if !isStyleSectionCollapsed}
+			<div class="mt-4 grid gap-3 sm:grid-cols-2">
+				{#each stylePresets as style}
+					<button type="button" class={`rounded-lg border p-4 text-left transition ${selectedStyleId === style.id ? 'border-amber-500 bg-amber-50 ring-1 ring-amber-200' : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50'}`} on:click={() => selectStyle(style.id)}>
+						<div class="flex items-center justify-between gap-3">
+							<p class="text-sm font-semibold text-slate-900">{style.name}</p>
+							{#if selectedStyleId === style.id}<span class="rounded bg-amber-600 px-2 py-0.5 text-xs font-medium text-white">Selected</span>{/if}
+						</div>
+						<div class="mt-3 flex items-start gap-3">
+							<svg
+								width="128"
+								height="128"
+								viewBox="0 0 128 128"
+								class="h-16 w-16 shrink-0 rounded-md border border-slate-200 bg-white p-1"
+								aria-hidden="true"
+							>
+								{#if style.id === 'executive-briefing'}
+									<rect x="10" y="14" width="108" height="100" rx="10" fill="#e2e8f0" />
+									<rect x="20" y="28" width="58" height="10" rx="3" fill="#1e293b" />
+									<rect x="20" y="48" width="40" height="8" rx="3" fill="#64748b" />
+									<rect x="20" y="64" width="34" height="8" rx="3" fill="#64748b" />
+									<rect x="84" y="44" width="22" height="42" rx="4" fill="#0ea5e9" />
+								{:else if style.id === 'research-seminar'}
+									<circle cx="64" cy="64" r="50" fill="#e0f2fe" />
+									<path d="M24 76h80" stroke="#0369a1" stroke-width="6" />
+									<path d="M32 52h64" stroke="#0284c7" stroke-width="6" />
+									<circle cx="44" cy="48" r="8" fill="#0ea5e9" />
+									<circle cx="78" cy="70" r="10" fill="#0284c7" />
+								{:else if style.id === 'classroom-lecture'}
+									<rect x="12" y="20" width="104" height="70" rx="8" fill="#ecfccb" />
+									<rect x="18" y="26" width="92" height="58" rx="6" fill="#365314" />
+									<path d="M26 40h44M26 54h56M26 68h38" stroke="#d9f99d" stroke-width="5" />
+									<rect x="54" y="92" width="20" height="20" rx="4" fill="#84cc16" />
+								{:else if style.id === 'sales-pitch'}
+									<path d="M18 102l22-30 18 14 28-40 24 56z" fill="#ffedd5" />
+									<path d="M18 102l22-30 18 14 28-40 24 56" stroke="#ea580c" stroke-width="6" fill="none" />
+									<circle cx="86" cy="46" r="10" fill="#f97316" />
+								{:else if style.id === 'startup-demo'}
+									<rect x="16" y="18" width="96" height="92" rx="14" fill="#fef3c7" />
+									<path d="M34 86l18-34 14 22 12-18 16 30z" fill="#f59e0b" />
+									<circle cx="56" cy="40" r="8" fill="#ca8a04" />
+								{:else if style.id === 'policy-briefing'}
+									<rect x="20" y="14" width="88" height="100" rx="8" fill="#f1f5f9" />
+									<path d="M34 34h60M34 50h60M34 66h48M34 82h54" stroke="#475569" stroke-width="6" />
+									<circle cx="90" cy="82" r="10" fill="#0f766e" />
+								{:else if style.id === 'training-workshop'}
+									<rect x="14" y="18" width="100" height="92" rx="10" fill="#ede9fe" />
+									<rect x="24" y="30" width="22" height="22" rx="4" fill="#7c3aed" />
+									<rect x="24" y="60" width="22" height="22" rx="4" fill="#7c3aed" />
+									<path d="M54 42h50M54 72h38" stroke="#5b21b6" stroke-width="6" />
+								{:else}
+									<circle cx="64" cy="64" r="48" fill="#fee2e2" />
+									<path d="M34 84h60" stroke="#991b1b" stroke-width="8" />
+									<path d="M42 50h44M42 66h44" stroke="#ef4444" stroke-width="6" />
+									<path d="M64 28v16" stroke="#b91c1c" stroke-width="8" />
+								{/if}
+							</svg>
+							<div class="space-y-1 text-xs text-slate-600">
+								<p><span class="font-medium text-slate-700">Speaker:</span> {style.speaker}</p>
+								<p><span class="font-medium text-slate-700">Audience:</span> {style.audience}</p>
+								<p><span class="font-medium text-slate-700">Purpose:</span> {style.purpose}</p>
+								<p><span class="font-medium text-slate-700">Tone:</span> {style.tone}</p>
+							</div>
+						</div>
+					</button>
+				{/each}
+			</div>
+		{/if}
+		<p class="mt-3 text-xs text-slate-500">Current style: {stylePresets.find((style) => style.id === selectedStyleId)?.name}</p>
+	</section>
+
+	<section class="mt-6 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
 		<div class="flex flex-wrap items-center justify-between gap-3">
-			<h2 class="text-lg font-semibold text-slate-900">3. Table of Contents</h2>
+			<h2 class="text-lg font-semibold text-slate-900">5. Table of Contents</h2>
 			<button class="rounded-md bg-cyan-600 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-500 disabled:cursor-not-allowed disabled:bg-cyan-300" on:click={generateToc} disabled={!parseResult || isGeneratingToc}>
 				{isGeneratingToc ? 'Generating...' : 'Generate TOC'}
 			</button>
@@ -545,48 +919,6 @@
 	</section>
 
 	<section class="mt-6 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-		<h2 class="text-lg font-semibold text-slate-900">4. Theme Selection</h2>
-		<p class="mt-2 text-sm text-slate-600">Choose a color theme for generated slides.</p>
-		<div class="mt-4 grid gap-3 sm:grid-cols-2">
-			{#each themePresets as theme}
-				<button type="button" class={`rounded-lg border p-4 text-left transition ${selectedThemeId === theme.id ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-200' : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50'}`} on:click={() => selectTheme(theme.id)}>
-					<div class="flex items-center justify-between gap-3">
-						<p class="text-sm font-semibold text-slate-900">{theme.name}</p>
-						{#if selectedThemeId === theme.id}<span class="rounded bg-blue-600 px-2 py-0.5 text-xs font-medium text-white">Selected</span>{/if}
-					</div>
-					<p class="mt-1 text-xs text-slate-600">{theme.description}</p>
-					<div class="mt-3 flex gap-2">
-						{#each theme.colors as color}<span class="h-6 flex-1 rounded" style={`background-color: ${color}`}></span>{/each}
-					</div>
-				</button>
-			{/each}
-		</div>
-		<p class="mt-3 text-xs text-slate-500">Current theme: {themePresets.find((theme) => theme.id === selectedThemeId)?.name}</p>
-	</section>
-
-	<section class="mt-6 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-		<h2 class="text-lg font-semibold text-slate-900">5. Style Selection</h2>
-		<p class="mt-2 text-sm text-slate-600">Choose a presentation style based on speaker, audience, and purpose.</p>
-		<div class="mt-4 grid gap-3 sm:grid-cols-2">
-			{#each stylePresets as style}
-				<button type="button" class={`rounded-lg border p-4 text-left transition ${selectedStyleId === style.id ? 'border-amber-500 bg-amber-50 ring-1 ring-amber-200' : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50'}`} on:click={() => selectStyle(style.id)}>
-					<div class="flex items-center justify-between gap-3">
-						<p class="text-sm font-semibold text-slate-900">{style.name}</p>
-						{#if selectedStyleId === style.id}<span class="rounded bg-amber-600 px-2 py-0.5 text-xs font-medium text-white">Selected</span>{/if}
-					</div>
-					<div class="mt-2 space-y-1 text-xs text-slate-600">
-						<p><span class="font-medium text-slate-700">Speaker:</span> {style.speaker}</p>
-						<p><span class="font-medium text-slate-700">Audience:</span> {style.audience}</p>
-						<p><span class="font-medium text-slate-700">Purpose:</span> {style.purpose}</p>
-						<p><span class="font-medium text-slate-700">Tone:</span> {style.tone}</p>
-					</div>
-				</button>
-			{/each}
-		</div>
-		<p class="mt-3 text-xs text-slate-500">Current style: {stylePresets.find((style) => style.id === selectedStyleId)?.name}</p>
-	</section>
-
-	<section class="mt-6 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
 		<div class="flex flex-wrap items-center justify-between gap-3">
 			<h2 class="text-lg font-semibold text-slate-900">6. Slide Preview</h2>
 			<button
@@ -616,7 +948,117 @@
 						srcdoc={slideResult.renderedHtml}
 					></iframe>
 				</div>
-				<p class="text-xs text-slate-500">theme: {slideResult.themeId} / selected toc: {slideResult.selectedTocItemId}</p>
+				<div class="flex flex-wrap items-center justify-between gap-2">
+					<p class="text-xs text-slate-500">theme: {slideResult.themeId} / selected toc: {slideResult.selectedTocItemId}</p>
+					<button
+						type="button"
+						class="rounded-md bg-slate-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-600"
+						on:click={downloadSlideHtml}
+					>
+						Download Slide HTML
+					</button>
+				</div>
+
+				<div class="rounded-lg border border-slate-200 bg-white p-4">
+					<h3 class="text-sm font-semibold text-slate-900">7. Slide Feedback</h3>
+					<div class="mt-3 flex flex-wrap items-center gap-2">
+						<button
+							type="button"
+							class="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:bg-emerald-300"
+							on:click={() => submitFeedback(true, undefined, feedbackComment)}
+							disabled={isSubmittingFeedback}
+						>
+							Like
+						</button>
+						<button
+							type="button"
+							class="rounded-md bg-rose-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-rose-500 disabled:cursor-not-allowed disabled:bg-rose-300"
+							on:click={() =>
+								submitFeedback(false, selectedDislikeReason ?? undefined, feedbackComment)}
+							disabled={isSubmittingFeedback}
+						>
+							Dislike
+						</button>
+					</div>
+
+					<div class="mt-3 space-y-2">
+						<p class="text-xs font-medium text-slate-700">If dislike, choose reason:</p>
+						<label class="flex items-center gap-2 text-xs text-slate-700">
+							<input
+								type="radio"
+								name="dislike-reason"
+								value="STYLE_MISMATCH"
+								checked={selectedDislikeReason === 'STYLE_MISMATCH'}
+								on:change={() => (selectedDislikeReason = 'STYLE_MISMATCH')}
+							/>
+							Style mismatch
+						</label>
+						<label class="flex items-center gap-2 text-xs text-slate-700">
+							<input
+								type="radio"
+								name="dislike-reason"
+								value="CONTENT_MISMATCH"
+								checked={selectedDislikeReason === 'CONTENT_MISMATCH'}
+								on:change={() => (selectedDislikeReason = 'CONTENT_MISMATCH')}
+							/>
+							Content mismatch
+						</label>
+						<label class="flex items-center gap-2 text-xs text-slate-700">
+							<input
+								type="radio"
+								name="dislike-reason"
+								value="HTML_BROKEN"
+								checked={selectedDislikeReason === 'HTML_BROKEN'}
+								on:change={() => (selectedDislikeReason = 'HTML_BROKEN')}
+							/>
+							HTML broken
+						</label>
+					</div>
+					<div class="mt-3 space-y-2">
+						<label for="feedback-comment" class="text-xs font-medium text-slate-700">
+							Other comments (optional)
+						</label>
+						<textarea
+							id="feedback-comment"
+							class="min-h-24 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 outline-none ring-blue-300 transition focus:border-blue-400 focus:ring-2"
+							placeholder="Add extra feedback for next regeneration."
+							bind:value={feedbackComment}
+							maxlength="2000"
+						></textarea>
+						<p class="text-xs text-slate-500">
+							Potentially unsafe code-like tags (e.g. script tags) are removed before processing.
+						</p>
+					</div>
+
+					<div class="mt-3 flex flex-wrap items-center gap-2">
+						<button
+							type="button"
+							class="rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:bg-slate-400"
+							on:click={generateSlidePreview}
+							disabled={isBusy}
+						>
+							Regenerate with Feedback
+						</button>
+						<span class="text-xs text-slate-500">contextVersion: {slideContextVersion}</span>
+					</div>
+
+					{#if feedbackError}
+						<div class="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2">
+							<p class="text-xs text-red-700">{feedbackError}</p>
+							<button
+								type="button"
+								class="mt-1 text-xs font-medium text-red-700 underline underline-offset-2"
+								on:click={retryLastAction}
+								disabled={isBusy}
+							>
+								Retry
+							</button>
+						</div>
+					{/if}
+					{#if feedbackSuccess}
+						<p class="mt-3 text-xs text-emerald-700">{feedbackSuccess}</p>
+					{/if}
+				</div>
 			</div>
 		{/if}
 	</section>

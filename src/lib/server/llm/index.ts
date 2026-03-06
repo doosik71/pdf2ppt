@@ -11,3 +11,9 @@ export type {
 
 export { GeminiAdapter, OllamaAdapter } from './adapters';
 export { createLlmProvider, getDefaultLlmProvider } from './factory';
+export {
+	RetryExhaustedError,
+	runWithRetry,
+	type RetryOptions,
+	type RetryResult
+} from './retry';

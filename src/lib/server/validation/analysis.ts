@@ -60,5 +60,25 @@ export const slideGenerateResultSchema = z.object({
 	slideCss: z.string().trim().min(1),
 	renderedHtml: z.string().trim().min(1),
 	rationale: z.string().trim().optional(),
-	usedContextVersion: z.number().int().nonnegative().optional()
+	usedContextVersion: z.number().int().nonnegative().optional(),
+	retry: z
+		.object({
+			attempt: z.number().int().positive(),
+			maxAttempts: z.number().int().positive(),
+			delaysUsedMs: z.array(z.number().int().nonnegative())
+	})
+		.optional()
+});
+
+export const slideFeedbackResultSchema = z.object({
+	feedbackId: z.string().trim().min(1),
+	documentId: z.string().trim().min(1),
+	selectedTocItemId: z.string().trim().min(1),
+	liked: z.boolean(),
+	reason: z.enum(['STYLE_MISMATCH', 'CONTENT_MISMATCH', 'HTML_BROKEN']).optional(),
+	regeneration: z.object({
+		goalPromptPatch: z.string(),
+		themePromptPatch: z.string(),
+		shouldResetContext: z.boolean()
+	})
 });
