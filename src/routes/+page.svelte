@@ -1,6 +1,4 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
-
 	const MAX_PDF_SIZE_BYTES = 20 * 1024 * 1024;
 	type ParseResult = {
 		documentId: string;
@@ -256,7 +254,6 @@
 	let forceContextReset = false;
 	let previewFrame: HTMLIFrameElement | null = null;
 	let lastFeedbackPayload: { liked: boolean; reason?: SlideFeedbackReason; comment?: string } | null = null;
-	let exportCompatibilityNote = '';
 
 	$: isBusy = isUploading || isSummarizing || isGeneratingToc || isGeneratingSlide || isSubmittingFeedback;
 	$: busyLabel = isUploading
@@ -369,21 +366,6 @@
 		});
 	}
 
-	function evaluateExportCompatibility() {
-		if (typeof window === 'undefined') return;
-		const hasSvgForeignObject = typeof SVGForeignObjectElement !== 'undefined';
-		const hasCanvasToBlob =
-			typeof HTMLCanvasElement !== 'undefined' &&
-			typeof HTMLCanvasElement.prototype.toBlob === 'function';
-		const hasBlobDownload = typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function';
-		if (hasSvgForeignObject && hasCanvasToBlob && hasBlobDownload) {
-			exportCompatibilityNote = 'Export is optimized for latest Chrome and Edge.';
-			return;
-		}
-		exportCompatibilityNote =
-			'Browser export compatibility is limited. Use latest Chrome or Edge for best results.';
-	}
-
 	function downloadSlideHtml() {
 		if (!slideResult) return;
 		const blob = new Blob([slideResult.renderedHtml], { type: 'text/html;charset=utf-8' });
@@ -395,88 +377,6 @@
 		anchor.click();
 		anchor.remove();
 		URL.revokeObjectURL(url);
-	}
-
-	function buildSvgFromPreview(): { svgMarkup: string; width: number; height: number } | null {
-		if (!previewFrame) return null;
-		const iframeDocument = previewFrame.contentDocument;
-		if (!iframeDocument) return null;
-
-		const width = 1366;
-		const height = 768;
-		const serializedHtml = iframeDocument.documentElement.outerHTML;
-		const svgMarkup =
-			`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">` +
-			`<foreignObject width="100%" height="100%">${serializedHtml}</foreignObject></svg>`;
-
-		return { svgMarkup, width, height };
-	}
-
-	function downloadSlideSvg() {
-		const svgPayload = buildSvgFromPreview();
-		if (!svgPayload) {
-			slideError = 'Unable to access slide preview for SVG export.';
-			return;
-		}
-		const blob = new Blob([svgPayload.svgMarkup], { type: 'image/svg+xml;charset=utf-8' });
-		const url = URL.createObjectURL(blob);
-		const anchor = document.createElement('a');
-		anchor.href = url;
-		anchor.download = buildExportFileName('svg');
-		document.body.appendChild(anchor);
-		anchor.click();
-		anchor.remove();
-		URL.revokeObjectURL(url);
-	}
-
-	async function exportSlidePng() {
-		const svgPayload = buildSvgFromPreview();
-		if (!svgPayload) {
-			slideError = 'Unable to access slide preview for PNG export.';
-			return;
-		}
-
-		try {
-			const { svgMarkup, width, height } = svgPayload;
-			const encodedSvg = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgMarkup)}`;
-			const image = await new Promise<HTMLImageElement>((resolve, reject) => {
-				const img = new Image();
-				img.onload = () => resolve(img);
-				img.onerror = () => reject(new Error('Failed to render SVG snapshot'));
-				img.src = encodedSvg;
-			});
-
-			const canvas = document.createElement('canvas');
-			canvas.width = width;
-			canvas.height = height;
-			const context = canvas.getContext('2d');
-			if (!context) {
-				throw new Error('Canvas context is unavailable');
-			}
-
-			context.fillStyle = '#ffffff';
-			context.fillRect(0, 0, width, height);
-			context.drawImage(image, 0, 0, width, height);
-
-			const pngBlob = await new Promise<Blob | null>((resolve) =>
-				canvas.toBlob(resolve, 'image/png', 1)
-			);
-			if (!pngBlob) {
-				throw new Error('Failed to encode PNG');
-			}
-
-			const url = URL.createObjectURL(pngBlob);
-			const anchor = document.createElement('a');
-			anchor.href = url;
-			anchor.download = buildExportFileName('png');
-			document.body.appendChild(anchor);
-			anchor.click();
-			anchor.remove();
-			URL.revokeObjectURL(url);
-		} catch (error) {
-			slideError = 'PNG export failed in browser capture.';
-			console.error('[export.png] failed', error);
-		}
 	}
 
 	function resetAllResults() {
@@ -677,7 +577,7 @@
 	}
 
 	async function generateSlidePreview() {
-		if (!parseResult || !summaryResult || !tocResult || !selectedTocItemId || isGeneratingSlide) return;
+		if (!parseResult || !tocResult || !selectedTocItemId || isGeneratingSlide) return;
 
 		isGeneratingSlide = true;
 		slideError = '';
@@ -685,7 +585,7 @@
 		const requestBody = {
 			documentId: parseResult.documentId,
 			fullText: parseResult.fullText,
-			summary: summaryResult.summary,
+			summary: summaryResult?.summary,
 			tocItems: tocResult.tocItems,
 			selectedTocItemId,
 			themeId: selectedThemeId,
@@ -849,9 +749,6 @@
 		}
 	}
 
-	onMount(() => {
-		evaluateExportCompatibility();
-	});
 </script>
 
 <main class="mx-auto min-h-screen w-full max-w-5xl px-4 py-10">
@@ -899,7 +796,14 @@
 		{/if}
 		<div class="mt-4 flex items-center justify-end gap-3">
 			<button class="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-blue-300" on:click={uploadPdf} disabled={!selectedFile || isUploading}>
-				{isUploading ? 'Uploading...' : 'Upload and Parse'}
+				{#if isUploading}
+					<span class="inline-flex items-center gap-2">
+						<span class="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white"></span>
+						<span>Uploading...</span>
+					</span>
+				{:else}
+					Upload and Parse
+				{/if}
 			</button>
 		</div>
 	</section>
@@ -917,7 +821,14 @@
 		<div class="flex flex-wrap items-center justify-between gap-3">
 			<h2 class="text-lg font-semibold text-slate-900">2. Summary</h2>
 			<button class="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:bg-indigo-300" on:click={generateSummary} disabled={!parseResult || isSummarizing}>
-				{isSummarizing ? 'Generating...' : 'Generate Summary'}
+				{#if isSummarizing}
+					<span class="inline-flex items-center gap-2">
+						<span class="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white"></span>
+						<span>Generating...</span>
+					</span>
+				{:else}
+					Generate Summary
+				{/if}
 			</button>
 		</div>
 		{#if !parseResult}<p class="mt-3 text-sm text-slate-500">Upload a PDF first to enable summary generation.</p>{/if}
@@ -943,43 +854,7 @@
 	<section class="mt-6 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
 		<div class="flex items-start justify-between gap-3">
 			<div>
-				<h2 class="text-lg font-semibold text-slate-900">3. Theme Selection</h2>
-				<p class="mt-2 text-sm text-slate-600">Choose a color theme for generated slides.</p>
-			</div>
-			<button
-				type="button"
-				class="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
-				on:click={toggleThemeSection}
-				aria-expanded={!isThemeSectionCollapsed}
-				aria-label={isThemeSectionCollapsed ? 'Expand theme section' : 'Shrink theme section'}
-				title={isThemeSectionCollapsed ? 'Expand' : 'Shrink'}
-			>
-				{isThemeSectionCollapsed ? '▼' : '▲'}
-			</button>
-		</div>
-		{#if !isThemeSectionCollapsed}
-			<div class="mt-4 grid gap-3 sm:grid-cols-2">
-				{#each themePresets as theme}
-					<button type="button" class={`rounded-lg border p-4 text-left transition ${selectedThemeId === theme.id ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-200' : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50'}`} on:click={() => selectTheme(theme.id)}>
-						<div class="flex items-center justify-between gap-3">
-							<p class="text-sm font-semibold text-slate-900">{theme.name}</p>
-							{#if selectedThemeId === theme.id}<span class="rounded bg-blue-600 px-2 py-0.5 text-xs font-medium text-white">Selected</span>{/if}
-						</div>
-						<p class="mt-1 text-xs text-slate-600">{theme.description}</p>
-						<div class="mt-3 flex gap-2">
-							{#each theme.colors as color}<span class="h-6 flex-1 rounded" style={`background-color: ${color}`}></span>{/each}
-						</div>
-					</button>
-				{/each}
-			</div>
-		{/if}
-		<p class="mt-3 text-xs text-slate-500">Current theme: {themePresets.find((theme) => theme.id === selectedThemeId)?.name}</p>
-	</section>
-
-	<section class="mt-6 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-		<div class="flex items-start justify-between gap-3">
-			<div>
-				<h2 class="text-lg font-semibold text-slate-900">4. Style Selection</h2>
+				<h2 class="text-lg font-semibold text-slate-900">3. Style Selection</h2>
 				<p class="mt-2 text-sm text-slate-600">Choose a presentation style based on speaker, audience, and purpose.</p>
 			</div>
 			<button
@@ -1065,10 +940,53 @@
 	</section>
 
 	<section class="mt-6 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+		<div class="flex items-start justify-between gap-3">
+			<div>
+				<h2 class="text-lg font-semibold text-slate-900">4. Theme Selection</h2>
+				<p class="mt-2 text-sm text-slate-600">Choose a color theme for generated slides.</p>
+			</div>
+			<button
+				type="button"
+				class="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+				on:click={toggleThemeSection}
+				aria-expanded={!isThemeSectionCollapsed}
+				aria-label={isThemeSectionCollapsed ? 'Expand theme section' : 'Shrink theme section'}
+				title={isThemeSectionCollapsed ? 'Expand' : 'Shrink'}
+			>
+				{isThemeSectionCollapsed ? '▼' : '▲'}
+			</button>
+		</div>
+		{#if !isThemeSectionCollapsed}
+			<div class="mt-4 grid gap-3 sm:grid-cols-2">
+				{#each themePresets as theme}
+					<button type="button" class={`rounded-lg border p-4 text-left transition ${selectedThemeId === theme.id ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-200' : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50'}`} on:click={() => selectTheme(theme.id)}>
+						<div class="flex items-center justify-between gap-3">
+							<p class="text-sm font-semibold text-slate-900">{theme.name}</p>
+							{#if selectedThemeId === theme.id}<span class="rounded bg-blue-600 px-2 py-0.5 text-xs font-medium text-white">Selected</span>{/if}
+						</div>
+						<p class="mt-1 text-xs text-slate-600">{theme.description}</p>
+						<div class="mt-3 flex gap-2">
+							{#each theme.colors as color}<span class="h-6 flex-1 rounded" style={`background-color: ${color}`}></span>{/each}
+						</div>
+					</button>
+				{/each}
+			</div>
+		{/if}
+		<p class="mt-3 text-xs text-slate-500">Current theme: {themePresets.find((theme) => theme.id === selectedThemeId)?.name}</p>
+	</section>
+
+	<section class="mt-6 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
 		<div class="flex flex-wrap items-center justify-between gap-3">
 			<h2 class="text-lg font-semibold text-slate-900">5. Table of Contents</h2>
 			<button class="rounded-md bg-cyan-600 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-500 disabled:cursor-not-allowed disabled:bg-cyan-300" on:click={generateToc} disabled={!parseResult || isGeneratingToc}>
-				{isGeneratingToc ? 'Generating...' : 'Generate TOC'}
+				{#if isGeneratingToc}
+					<span class="inline-flex items-center gap-2">
+						<span class="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white"></span>
+						<span>Generating...</span>
+					</span>
+				{:else}
+					Generate TOC
+				{/if}
 			</button>
 		</div>
 		{#if !parseResult}<p class="mt-3 text-sm text-slate-500">Upload a PDF first to enable TOC generation.</p>{/if}
@@ -1124,13 +1042,20 @@
 			<button
 				class="rounded-md bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500 disabled:cursor-not-allowed disabled:bg-violet-300"
 				on:click={generateSlidePreview}
-				disabled={!parseResult || !summaryResult || !tocResult || !selectedTocItemId || isGeneratingSlide}
+				disabled={!parseResult || !tocResult || !selectedTocItemId || isGeneratingSlide}
 			>
-				{isGeneratingSlide ? 'Generating...' : 'Generate Slide'}
+				{#if isGeneratingSlide}
+					<span class="inline-flex items-center gap-2">
+						<span class="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white"></span>
+						<span>Generating...</span>
+					</span>
+				{:else}
+					Generate Slide
+				{/if}
 			</button>
 		</div>
-		{#if !parseResult || !summaryResult || !tocResult || !selectedTocItemId}
-			<p class="mt-3 text-sm text-slate-500">Complete upload, summary, TOC generation, and TOC item selection first.</p>
+		{#if !parseResult || !tocResult || !selectedTocItemId}
+			<p class="mt-3 text-sm text-slate-500">Complete upload, TOC generation, and TOC item selection first.</p>
 		{/if}
 		{#if slideError}
 			<div class="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2">
@@ -1156,29 +1081,12 @@
 					<div class="flex flex-wrap items-center gap-2">
 						<button
 							type="button"
-							class="rounded-md bg-slate-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-600"
+							class="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500"
 							on:click={downloadSlideHtml}
 						>
 							💾 HTML
 						</button>
-						<button
-							type="button"
-							class="rounded-md bg-slate-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-600"
-							on:click={downloadSlideSvg}
-						>
-							💾 SVG
-						</button>
-						<button
-							type="button"
-							class="rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800"
-							on:click={exportSlidePng}
-						>
-							💾 PNG
-						</button>
 					</div>
-					{#if exportCompatibilityNote}
-						<p class="text-xs text-slate-500">{exportCompatibilityNote}</p>
-					{/if}
 				</div>
 
 				<div class="rounded-lg border border-slate-200 bg-white p-4">

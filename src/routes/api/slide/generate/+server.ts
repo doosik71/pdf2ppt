@@ -38,7 +38,10 @@ const THEME_TEMPLATE_ALIASES: Record<string, ThemeTemplateId> = {
 const slideGenerateRequestSchema = z.object({
 	documentId: z.string().trim().min(1),
 	fullText: z.string().trim().min(1),
-	summary: z.string().trim().min(1),
+	summary: z.preprocess(
+		(value) => (typeof value === 'string' ? value : undefined),
+		z.string().trim().optional()
+	),
 	tocItems: z.array(tocItemSchema).min(1),
 	selectedTocItemId: z.string().trim().min(1),
 	themeId: themeIdSchema.default('classic-blue'),

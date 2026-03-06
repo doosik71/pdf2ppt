@@ -34,7 +34,7 @@ export interface GenerateTocOutput {
 export interface GenerateSlideInput {
 	documentId: string;
 	fullText: string;
-	summary: string;
+	summary?: string;
 	tocItems: TocItem[];
 	selectedTocItem: TocItem;
 	goalPrompt: string;
