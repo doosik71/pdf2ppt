@@ -1,6 +1,7 @@
 import {
 	DEFAULT_PROVIDER,
 	GEMINI_API_KEY,
+	GEMINI_MODEL_ID,
 	OLLAMA_BASE_URL,
 	OLLAMA_MODEL_ID
 } from '$env/static/private';
@@ -11,6 +12,7 @@ const providerSchema = z.enum(['gemini', 'ollama']);
 const rawEnvSchema = z.object({
 	DEFAULT_PROVIDER: providerSchema.default('gemini'),
 	GEMINI_API_KEY: z.string().trim().min(1).optional(),
+	GEMINI_MODEL_ID: z.string().trim().min(1).optional(),
 	OLLAMA_BASE_URL: z.url().optional(),
 	OLLAMA_MODEL_ID: z.string().trim().min(1).optional()
 });
@@ -60,6 +62,7 @@ export function loadServerEnv(): ServerEnv {
 	const parsed = serverEnvSchema.safeParse({
 		DEFAULT_PROVIDER,
 		GEMINI_API_KEY: GEMINI_API_KEY || undefined,
+		GEMINI_MODEL_ID: GEMINI_MODEL_ID || undefined,
 		OLLAMA_BASE_URL: OLLAMA_BASE_URL || undefined,
 		OLLAMA_MODEL_ID: OLLAMA_MODEL_ID || undefined
 	});

@@ -45,10 +45,10 @@ export class GeminiAdapter implements LlmProvider {
 	private readonly ai: GoogleGenAI;
 	private readonly model: string;
 
-	constructor(model = 'gemini-2.0-flash') {
-		const { GEMINI_API_KEY } = getServerEnv();
+	constructor(model?: string) {
+		const { GEMINI_API_KEY, GEMINI_MODEL_ID } = getServerEnv();
 		this.ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-		this.model = model;
+		this.model = model ?? GEMINI_MODEL_ID ?? 'gemini-2.5-flash';
 	}
 
 	async summarize(input: SummarizeInput): Promise<SummarizeOutput> {
@@ -119,13 +119,36 @@ export class GeminiAdapter implements LlmProvider {
 		prompt: string,
 		schema: z.ZodType<T>
 	): Promise<T> {
-		const response = await this.ai.models.generateContent({
-			model: this.model,
-			contents: prompt,
-			config: {
-				responseMimeType: 'application/json'
+		const fallbackModels = ['gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+		const candidateModels = [this.model, ...fallbackModels].filter(
+			(modelId, index, self) => !!modelId && self.indexOf(modelId) === index
+		);
+
+		let response: Awaited<ReturnType<typeof this.ai.models.generateContent>> | null = null;
+		let lastError: unknown;
+		for (const modelId of candidateModels) {
+			try {
+				response = await this.ai.models.generateContent({
+					model: modelId,
+					contents: prompt,
+					config: {
+						responseMimeType: 'application/json'
+					}
+				});
+				break;
+			} catch (error) {
+				lastError = error;
+				const message = error instanceof Error ? error.message : String(error);
+				if (/not found|unsupported|404/i.test(message)) {
+					continue;
+				}
+				throw error;
 			}
-		});
+		}
+
+		if (!response) {
+			throw lastError instanceof Error ? lastError : new Error(String(lastError));
+		}
 
 		const text = response.text?.trim();
 		if (!text) {

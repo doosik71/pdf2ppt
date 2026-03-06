@@ -291,6 +291,7 @@ export function withApiHandler<T>(
 				status: normalized.status,
 				code: normalized.code,
 				message: normalized.message,
+				details: normalized.details,
 				durationMs: now() - startedAt
 			});
 			return errorResponse(error, requestId);

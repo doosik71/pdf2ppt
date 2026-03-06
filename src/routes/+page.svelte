@@ -1,4 +1,4 @@
-<script lang="ts">
+﻿<script lang="ts">
 	const MAX_PDF_SIZE_BYTES = 20 * 1024 * 1024;
 	type ParseResult = {
 		documentId: string;
@@ -869,7 +869,7 @@
 			</button>
 		</div>
 		{#if !isStyleSectionCollapsed}
-			<div class="mt-4 grid gap-3 sm:grid-cols-2">
+			<div class="mt-4 grid max-h-96 gap-3 overflow-y-auto pr-1 sm:grid-cols-2">
 				{#each stylePresets as style}
 					<button type="button" class={`rounded-lg border p-4 text-left transition ${selectedStyleId === style.id ? 'border-amber-500 bg-amber-50 ring-1 ring-amber-200' : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50'}`} on:click={() => selectStyle(style.id)}>
 						<div class="flex items-center justify-between gap-3">
@@ -957,7 +957,7 @@
 			</button>
 		</div>
 		{#if !isThemeSectionCollapsed}
-			<div class="mt-4 grid gap-3 sm:grid-cols-2">
+			<div class="mt-4 grid max-h-96 gap-3 overflow-y-auto pr-1 sm:grid-cols-2">
 				{#each themePresets as theme}
 					<button type="button" class={`rounded-lg border p-4 text-left transition ${selectedThemeId === theme.id ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-200' : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50'}`} on:click={() => selectTheme(theme.id)}>
 						<div class="flex items-center justify-between gap-3">
@@ -1201,3 +1201,4 @@
 		{/if}
 	</section>
 </main>
+

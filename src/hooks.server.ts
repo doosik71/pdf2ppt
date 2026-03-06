@@ -1,4 +1,5 @@
 import { json, type Handle } from '@sveltejs/kit';
+import { dev } from '$app/environment';
 
 const MAX_JSON_BODY_BYTES = 1_000_000;
 const MAX_MULTIPART_BODY_BYTES = 25 * 1024 * 1024;
@@ -40,11 +41,12 @@ function apiValidationError(status: number, message: string, requestId?: string)
 function applySecurityHeaders(response: Response): void {
 	const csp = [
 		"default-src 'self'",
-		"script-src 'self' 'unsafe-inline'",
+		`script-src 'self' 'unsafe-inline'${dev ? " 'unsafe-eval' blob:" : ''}`,
 		"style-src 'self' 'unsafe-inline'",
 		"img-src 'self' data: blob:",
 		"font-src 'self' data:",
-		"connect-src 'self'",
+		`connect-src 'self'${dev ? ' ws: wss:' : ''}`,
+		"worker-src 'self' blob:",
 		"frame-src 'self'",
 		"frame-ancestors 'none'",
 		"object-src 'none'",
