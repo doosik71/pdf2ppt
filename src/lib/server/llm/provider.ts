@@ -24,6 +24,7 @@ export interface GenerateTocInput {
 	fullText: string;
 	summary?: string;
 	language?: string;
+	stylePrompt?: string;
 }
 
 export interface GenerateTocOutput {
@@ -40,6 +41,7 @@ export interface GenerateSlideInput {
 	themePrompt: string;
 	templateHtml: string;
 	contextVersion?: number;
+	forceContextReset?: boolean;
 }
 
 export interface GenerateSlideOutput {

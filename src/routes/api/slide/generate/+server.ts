@@ -1,8 +1,14 @@
 import { z } from 'zod';
+import { parse, serialize } from 'parse5';
 
 import { getDefaultLlmProvider, RetryExhaustedError, runWithRetry } from '$lib/server/llm';
 import { renderSlideTemplate, validateGeneratedSlide } from '$lib/server/slide';
-import { getThemeTemplate, type ThemeTemplateId } from '$lib/templates/themes';
+import {
+	getThemeTemplate,
+	SLIDE_CONTENTS_TOKEN,
+	SLIDE_CSS_TOKEN,
+	type ThemeTemplateId
+} from '$lib/templates/themes';
 import {
 	ApiError,
 	apiError,
@@ -39,8 +45,61 @@ const slideGenerateRequestSchema = z.object({
 	goalPrompt: z.string().trim().optional(),
 	themePrompt: z.string().trim().optional(),
 	templateHtml: z.string().trim().optional(),
-	contextVersion: z.number().int().nonnegative().optional()
+	contextVersion: z.number().int().nonnegative().optional(),
+	forceContextReset: z.boolean().optional()
 });
+
+type NodeLike = {
+	tagName?: string;
+	childNodes?: NodeLike[];
+};
+
+function stripCodeFence(text: string): string {
+	const fenced = text.trim().match(/^```(?:html)?\s*([\s\S]*?)\s*```$/i);
+	return fenced?.[1]?.trim() ?? text.trim();
+}
+
+function findFirstTag(node: NodeLike, tagName: string): NodeLike | null {
+	if (node.tagName === tagName) return node;
+	for (const child of node.childNodes ?? []) {
+		const found = findFirstTag(child, tagName);
+		if (found) return found;
+	}
+	return null;
+}
+
+function containsAny(text: string, patterns: string[]): boolean {
+	const lowered = text.toLowerCase();
+	return patterns.some((pattern) => lowered.includes(pattern.toLowerCase()));
+}
+
+function extractSlideContentsFromModelOutput(rawSlideHtml: string): string {
+	const cleaned = stripCodeFence(rawSlideHtml);
+	const shouldExtractBody = containsAny(cleaned, [
+		'<html',
+		'<head',
+		'<body',
+		SLIDE_CONTENTS_TOKEN,
+		SLIDE_CSS_TOKEN
+	]);
+
+	let output = cleaned;
+	if (shouldExtractBody) {
+		try {
+			const documentNode = parse(cleaned) as unknown as NodeLike;
+			const bodyNode = findFirstTag(documentNode, 'body');
+			if (bodyNode?.childNodes && bodyNode.childNodes.length > 0) {
+				output = bodyNode.childNodes.map((node) => serialize(node as never)).join('').trim();
+			}
+		} catch {
+			output = cleaned;
+		}
+	}
+
+	output = output.replace(/<style[\s\S]*?<\/style>/gi, '').trim();
+	output = output.replace(SLIDE_CONTENTS_TOKEN, '').replace(SLIDE_CSS_TOKEN, '').trim();
+	return output;
+}
 
 function buildGoalPrompt(input: z.infer<typeof slideGenerateRequestSchema>): string {
 	return (
@@ -48,7 +107,9 @@ function buildGoalPrompt(input: z.infer<typeof slideGenerateRequestSchema>): str
 		[
 			'Generate one presentation slide for the selected TOC item.',
 			'Use concise headings and clear bullet points.',
-			'Keep content factual and aligned with the source document.'
+			'Keep content factual and aligned with the source document.',
+			'Return only the inner slide body markup for insertion at [SLIDE_CONTENTS_HERE].',
+			'Do not output full template, and do not include <html>, <head>, <body>, or <style> tags in slideHtml.'
 		].join(' ')
 	);
 }
@@ -80,6 +141,9 @@ function resolveTemplateHtml(input: z.infer<typeof slideGenerateRequestSchema>):
 export const POST = withApiHandler(async ({ request }) => {
 	const rawBody = await request.json();
 	const input = slideGenerateRequestSchema.parse(rawBody);
+	console.info(
+		`[slide.generate] documentId=${input.documentId} selectedTocItemId=${input.selectedTocItemId} contextVersion=${input.contextVersion ?? 0} forceContextReset=${input.forceContextReset ? 'yes' : 'no'}`
+	);
 
 	const selectedTocItem = input.tocItems.find((item) => item.id === input.selectedTocItemId);
 	if (!selectedTocItem) {
@@ -118,16 +182,18 @@ export const POST = withApiHandler(async ({ request }) => {
 				goalPrompt,
 				themePrompt,
 				templateHtml,
-				contextVersion: input.contextVersion
+				contextVersion: input.contextVersion,
+				forceContextReset: input.forceContextReset
 			});
+			const normalizedSlideHtml = extractSlideContentsFromModelOutput(generated.slideHtml);
 
 			const rendered = renderSlideTemplate({
 				templateHtml,
-				slideContents: generated.slideHtml,
+				slideContents: normalizedSlideHtml,
 				slideCss: generated.slideCss
 			});
 			const validation = validateGeneratedSlide({
-				slideHtml: generated.slideHtml,
+				slideHtml: normalizedSlideHtml,
 				slideCss: generated.slideCss,
 				renderedHtml: rendered.html
 			});
@@ -142,7 +208,7 @@ export const POST = withApiHandler(async ({ request }) => {
 				});
 			}
 
-			return { generated, rendered };
+			return { generated: { ...generated, slideHtml: normalizedSlideHtml }, rendered };
 		},
 		{
 			maxAttempts: MAX_GENERATE_ATTEMPTS,
@@ -180,4 +246,10 @@ export const POST = withApiHandler(async ({ request }) => {
 			delaysUsedMs: retryResult.delaysUsedMs
 		}
 	});
+}, {
+	timeoutMs: 900_000,
+	rateLimit: {
+		windowMs: 60_000,
+		max: 20
+	}
 });

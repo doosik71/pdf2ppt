@@ -143,4 +143,10 @@ export const POST = withApiHandler(async ({ request }) => {
 			truncated: chunks.length > selectedChunks.length
 		}
 	});
+}, {
+	timeoutMs: 600_000,
+	rateLimit: {
+		windowMs: 60_000,
+		max: 30
+	}
 });

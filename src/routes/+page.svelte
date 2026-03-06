@@ -1,4 +1,7 @@
-﻿<script lang="ts">
+<script lang="ts">
+	import { onMount } from 'svelte';
+
+	const MAX_PDF_SIZE_BYTES = 20 * 1024 * 1024;
 	type ParseResult = {
 		documentId: string;
 		fullText: string;
@@ -250,7 +253,10 @@
 	let feedbackGoalPromptPatch = '';
 	let feedbackThemePromptPatch = '';
 	let slideContextVersion = 0;
+	let forceContextReset = false;
+	let previewFrame: HTMLIFrameElement | null = null;
 	let lastFeedbackPayload: { liked: boolean; reason?: SlideFeedbackReason; comment?: string } | null = null;
+	let exportCompatibilityNote = '';
 
 	$: isBusy = isUploading || isSummarizing || isGeneratingToc || isGeneratingSlide || isSubmittingFeedback;
 	$: busyLabel = isUploading
@@ -297,17 +303,180 @@
 		return flattened.slice(0, 500);
 	}
 
+	function sanitizeRenderedHtml(html: string): string {
+		if (typeof DOMParser === 'undefined') return html;
+		const parser = new DOMParser();
+		const documentNode = parser.parseFromString(html, 'text/html');
+		const blockedTags = ['script', 'iframe', 'object', 'embed', 'link', 'meta', 'base'];
+
+		for (const tag of blockedTags) {
+			documentNode.querySelectorAll(tag).forEach((node) => node.remove());
+		}
+
+		const allElements = documentNode.querySelectorAll('*');
+		for (const element of allElements) {
+			for (const attr of [...element.attributes]) {
+				const attrName = attr.name.toLowerCase();
+				const attrValue = attr.value.trim().toLowerCase();
+				if (attrName.startsWith('on')) {
+					element.removeAttribute(attr.name);
+					continue;
+				}
+				if ((attrName === 'href' || attrName === 'src') && attrValue.startsWith('javascript:')) {
+					element.removeAttribute(attr.name);
+				}
+			}
+		}
+
+		return `<!doctype html>\n${documentNode.documentElement.outerHTML}`;
+	}
+
+	function sanitizeFileNamePart(value: string): string {
+		return value
+			.replace(/[\\/:*?"<>|]/g, ' ')
+			.replace(/\s+/g, ' ')
+			.trim()
+			.slice(0, 60);
+	}
+
+	function getSelectedTocItem(): TocItem | undefined {
+		if (!tocResult || !selectedTocItemId) return undefined;
+		return tocResult.tocItems.find((item) => item.id === selectedTocItemId);
+	}
+
+	function buildExportFileName(extension: 'html' | 'svg' | 'png'): string {
+		const rawDocumentName = parseResult?.metadata.filename ?? 'document';
+		const documentBase = sanitizeFileNamePart(rawDocumentName.replace(/\.[^.]+$/, '')) || 'document';
+		const tocItem = getSelectedTocItem();
+		const serial = String(tocItem?.order ?? 1).padStart(3, '0');
+		const tocTitle = sanitizeFileNamePart(tocItem?.title ?? 'slide');
+		return `${documentBase}_${serial}_${tocTitle}.${extension}`;
+	}
+
+	function triggerContextReset(reason: string) {
+		slideContextVersion += 1;
+		forceContextReset = true;
+		console.info(
+			`[context.reset] triggered reason="${reason}" nextContextVersion=${slideContextVersion}`
+		);
+	}
+
+	function logContextInfo(action: 'generate-request' | 'generate-response', extra?: Record<string, unknown>) {
+		console.info(`[context.${action}]`, {
+			contextVersion: slideContextVersion,
+			forceContextReset,
+			...extra
+		});
+	}
+
+	function evaluateExportCompatibility() {
+		if (typeof window === 'undefined') return;
+		const hasSvgForeignObject = typeof SVGForeignObjectElement !== 'undefined';
+		const hasCanvasToBlob =
+			typeof HTMLCanvasElement !== 'undefined' &&
+			typeof HTMLCanvasElement.prototype.toBlob === 'function';
+		const hasBlobDownload = typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function';
+		if (hasSvgForeignObject && hasCanvasToBlob && hasBlobDownload) {
+			exportCompatibilityNote = 'Export is optimized for latest Chrome and Edge.';
+			return;
+		}
+		exportCompatibilityNote =
+			'Browser export compatibility is limited. Use latest Chrome or Edge for best results.';
+	}
+
 	function downloadSlideHtml() {
 		if (!slideResult) return;
 		const blob = new Blob([slideResult.renderedHtml], { type: 'text/html;charset=utf-8' });
 		const url = URL.createObjectURL(blob);
 		const anchor = document.createElement('a');
 		anchor.href = url;
-		anchor.download = `slide-${slideResult.selectedTocItemId}.html`;
+		anchor.download = buildExportFileName('html');
 		document.body.appendChild(anchor);
 		anchor.click();
 		anchor.remove();
 		URL.revokeObjectURL(url);
+	}
+
+	function buildSvgFromPreview(): { svgMarkup: string; width: number; height: number } | null {
+		if (!previewFrame) return null;
+		const iframeDocument = previewFrame.contentDocument;
+		if (!iframeDocument) return null;
+
+		const width = 1366;
+		const height = 768;
+		const serializedHtml = iframeDocument.documentElement.outerHTML;
+		const svgMarkup =
+			`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">` +
+			`<foreignObject width="100%" height="100%">${serializedHtml}</foreignObject></svg>`;
+
+		return { svgMarkup, width, height };
+	}
+
+	function downloadSlideSvg() {
+		const svgPayload = buildSvgFromPreview();
+		if (!svgPayload) {
+			slideError = 'Unable to access slide preview for SVG export.';
+			return;
+		}
+		const blob = new Blob([svgPayload.svgMarkup], { type: 'image/svg+xml;charset=utf-8' });
+		const url = URL.createObjectURL(blob);
+		const anchor = document.createElement('a');
+		anchor.href = url;
+		anchor.download = buildExportFileName('svg');
+		document.body.appendChild(anchor);
+		anchor.click();
+		anchor.remove();
+		URL.revokeObjectURL(url);
+	}
+
+	async function exportSlidePng() {
+		const svgPayload = buildSvgFromPreview();
+		if (!svgPayload) {
+			slideError = 'Unable to access slide preview for PNG export.';
+			return;
+		}
+
+		try {
+			const { svgMarkup, width, height } = svgPayload;
+			const encodedSvg = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgMarkup)}`;
+			const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+				const img = new Image();
+				img.onload = () => resolve(img);
+				img.onerror = () => reject(new Error('Failed to render SVG snapshot'));
+				img.src = encodedSvg;
+			});
+
+			const canvas = document.createElement('canvas');
+			canvas.width = width;
+			canvas.height = height;
+			const context = canvas.getContext('2d');
+			if (!context) {
+				throw new Error('Canvas context is unavailable');
+			}
+
+			context.fillStyle = '#ffffff';
+			context.fillRect(0, 0, width, height);
+			context.drawImage(image, 0, 0, width, height);
+
+			const pngBlob = await new Promise<Blob | null>((resolve) =>
+				canvas.toBlob(resolve, 'image/png', 1)
+			);
+			if (!pngBlob) {
+				throw new Error('Failed to encode PNG');
+			}
+
+			const url = URL.createObjectURL(pngBlob);
+			const anchor = document.createElement('a');
+			anchor.href = url;
+			anchor.download = buildExportFileName('png');
+			document.body.appendChild(anchor);
+			anchor.click();
+			anchor.remove();
+			URL.revokeObjectURL(url);
+		} catch (error) {
+			slideError = 'PNG export failed in browser capture.';
+			console.error('[export.png] failed', error);
+		}
 	}
 
 	function resetAllResults() {
@@ -326,6 +495,7 @@
 		feedbackGoalPromptPatch = '';
 		feedbackThemePromptPatch = '';
 		slideContextVersion = 0;
+		forceContextReset = false;
 		lastFeedbackPayload = null;
 		lastFailedAction = null;
 	}
@@ -343,6 +513,11 @@
 		if (!(file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf'))) {
 			selectedFile = null;
 			uploadError = 'Only PDF files are allowed.';
+			return;
+		}
+		if (file.size > MAX_PDF_SIZE_BYTES) {
+			selectedFile = null;
+			uploadError = `PDF file is too large. Max size is ${MAX_PDF_SIZE_BYTES} bytes`;
 			return;
 		}
 
@@ -443,12 +618,15 @@
 		tocResult = null;
 		slideResult = null;
 		selectedTocItemId = null;
+		const summaryText = summaryResult?.summary?.trim();
+		const stylePrompt = buildStylePrompt().trim();
 		const requestBody = {
 			documentId: parseResult.documentId,
 			fullText: parseResult.fullText,
-			summary: summaryResult?.summary,
 			pageMap: parseResult.pageMap,
-			language: 'ko'
+			language: 'ko',
+			...(summaryText ? { summary: summaryText } : {}),
+			...(stylePrompt ? { stylePrompt } : {})
 		};
 
 		try {
@@ -513,8 +691,14 @@
 			themeId: selectedThemeId,
 			goalPrompt: buildGoalPrompt(),
 			themePrompt: buildThemePrompt(),
-			contextVersion: slideContextVersion
+			contextVersion: slideContextVersion,
+			forceContextReset
 		};
+		logContextInfo('generate-request', {
+			selectedTocItemId,
+			themeId: selectedThemeId,
+			styleId: selectedStyleId
+		});
 
 		try {
 			const response = await fetch('/api/slide/generate', {
@@ -532,10 +716,18 @@
 			}
 
 			slideResult = payload.data as SlideGenerateResult;
+			slideResult = {
+				...slideResult,
+				renderedHtml: sanitizeRenderedHtml(slideResult.renderedHtml)
+			};
+			logContextInfo('generate-response', {
+				usedContextVersion: slideResult.usedContextVersion ?? slideContextVersion
+			});
 			feedbackError = '';
 			feedbackSuccess = '';
 			feedbackResult = null;
 			selectedDislikeReason = null;
+			forceContextReset = false;
 		} catch (error) {
 			slideError = 'An error occurred while generating slide preview.';
 			lastFailedAction = 'slide';
@@ -644,7 +836,7 @@
 			feedbackGoalPromptPatch = feedbackResult.regeneration.goalPromptPatch;
 			feedbackThemePromptPatch = feedbackResult.regeneration.themePromptPatch;
 			if (feedbackResult.regeneration.shouldResetContext) {
-				slideContextVersion += 1;
+				triggerContextReset(`feedback:${feedbackResult.reason ?? 'generic'}`);
 			}
 			feedbackSuccess = liked
 				? 'Feedback saved. Current style will be preserved.'
@@ -656,6 +848,10 @@
 			isSubmittingFeedback = false;
 		}
 	}
+
+	onMount(() => {
+		evaluateExportCompatibility();
+	});
 </script>
 
 <main class="mx-auto min-h-screen w-full max-w-5xl px-4 py-10">
@@ -701,7 +897,7 @@
 				<button type="button" class="mt-2 text-xs font-medium text-red-700 underline underline-offset-2" on:click={retryLastAction} disabled={isBusy}>Retry</button>
 			</div>
 		{/if}
-		<div class="mt-4 flex items-center gap-3">
+		<div class="mt-4 flex items-center justify-end gap-3">
 			<button class="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-blue-300" on:click={uploadPdf} disabled={!selectedFile || isUploading}>
 				{isUploading ? 'Uploading...' : 'Upload and Parse'}
 			</button>
@@ -755,8 +951,10 @@
 				class="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
 				on:click={toggleThemeSection}
 				aria-expanded={!isThemeSectionCollapsed}
+				aria-label={isThemeSectionCollapsed ? 'Expand theme section' : 'Shrink theme section'}
+				title={isThemeSectionCollapsed ? 'Expand' : 'Shrink'}
 			>
-				{isThemeSectionCollapsed ? 'Expand' : 'Shrink'}
+				{isThemeSectionCollapsed ? '▼' : '▲'}
 			</button>
 		</div>
 		{#if !isThemeSectionCollapsed}
@@ -789,8 +987,10 @@
 				class="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
 				on:click={toggleStyleSection}
 				aria-expanded={!isStyleSectionCollapsed}
+				aria-label={isStyleSectionCollapsed ? 'Expand style section' : 'Shrink style section'}
+				title={isStyleSectionCollapsed ? 'Expand' : 'Shrink'}
 			>
-				{isStyleSectionCollapsed ? 'Expand' : 'Shrink'}
+				{isStyleSectionCollapsed ? '▼' : '▲'}
 			</button>
 		</div>
 		{#if !isStyleSectionCollapsed}
@@ -946,17 +1146,39 @@
 						class="h-[420px] w-full bg-white"
 						sandbox="allow-same-origin"
 						srcdoc={slideResult.renderedHtml}
+						bind:this={previewFrame}
 					></iframe>
 				</div>
 				<div class="flex flex-wrap items-center justify-between gap-2">
-					<p class="text-xs text-slate-500">theme: {slideResult.themeId} / selected toc: {slideResult.selectedTocItemId}</p>
-					<button
-						type="button"
-						class="rounded-md bg-slate-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-600"
-						on:click={downloadSlideHtml}
-					>
-						Download Slide HTML
-					</button>
+					<p class="text-xs text-slate-500">
+						theme: {slideResult.themeId} / selected toc: {slideResult.selectedTocItemId} / contextVersion: {slideContextVersion}{forceContextReset ? ' (reset pending)' : ''}
+					</p>
+					<div class="flex flex-wrap items-center gap-2">
+						<button
+							type="button"
+							class="rounded-md bg-slate-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-600"
+							on:click={downloadSlideHtml}
+						>
+							💾 HTML
+						</button>
+						<button
+							type="button"
+							class="rounded-md bg-slate-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-600"
+							on:click={downloadSlideSvg}
+						>
+							💾 SVG
+						</button>
+						<button
+							type="button"
+							class="rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800"
+							on:click={exportSlidePng}
+						>
+							💾 PNG
+						</button>
+					</div>
+					{#if exportCompatibilityNote}
+						<p class="text-xs text-slate-500">{exportCompatibilityNote}</p>
+					{/if}
 				</div>
 
 				<div class="rounded-lg border border-slate-200 bg-white p-4">
@@ -1038,6 +1260,14 @@
 							disabled={isBusy}
 						>
 							Regenerate with Feedback
+						</button>
+						<button
+							type="button"
+							class="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+							on:click={() => triggerContextReset('manual')}
+							disabled={isBusy}
+						>
+							Reset Context
 						</button>
 						<span class="text-xs text-slate-500">contextVersion: {slideContextVersion}</span>
 					</div>

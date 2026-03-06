@@ -8,8 +8,15 @@ import { apiError, tocResultSchema, withApiHandler } from '$lib/server/validatio
 const tocRequestSchema = z.object({
 	documentId: z.string().trim().min(1),
 	fullText: z.string().trim().min(1),
-	summary: z.string().trim().optional(),
+	summary: z.preprocess(
+		(value) => (typeof value === 'string' ? value : undefined),
+		z.string().trim().optional()
+	),
 	language: z.string().trim().optional(),
+	stylePrompt: z.preprocess(
+		(value) => (typeof value === 'string' ? value : undefined),
+		z.string().trim().optional()
+	),
 	pageMap: z
 		.array(
 			z.object({
@@ -68,6 +75,7 @@ export const POST = withApiHandler(async ({ request }) => {
 	const language = input.language ?? 'ko';
 	const normalizedText = normalizeText(input.fullText);
 	const normalizedSummary = input.summary ? normalizeText(input.summary) : undefined;
+	const normalizedStylePrompt = input.stylePrompt ? normalizeText(input.stylePrompt) : undefined;
 
 	if (normalizedText.length < 50) {
 		throw apiError({
@@ -84,7 +92,8 @@ export const POST = withApiHandler(async ({ request }) => {
 			documentId: input.documentId,
 			fullText: normalizedText,
 			summary: normalizedSummary,
-			language
+			language,
+			stylePrompt: normalizedStylePrompt
 		});
 
 		return tocResultSchema.parse({
@@ -115,7 +124,8 @@ export const POST = withApiHandler(async ({ request }) => {
 			documentId: `${input.documentId}:${chunk.id}`,
 			fullText: chunk.text,
 			summary: normalizedSummary,
-			language
+			language,
+			stylePrompt: normalizedStylePrompt
 		});
 		partialTocs.push(partial.tocItems);
 	}
@@ -131,7 +141,8 @@ export const POST = withApiHandler(async ({ request }) => {
 		documentId: `${input.documentId}:merged`,
 		fullText: mergedTocText,
 		summary: normalizedSummary,
-		language
+		language,
+		stylePrompt: normalizedStylePrompt
 	});
 
 	return tocResultSchema.parse({
@@ -143,4 +154,10 @@ export const POST = withApiHandler(async ({ request }) => {
 			truncated: chunks.length > selectedChunks.length
 		}
 	});
+}, {
+	timeoutMs: 600_000,
+	rateLimit: {
+		windowMs: 60_000,
+		max: 30
+	}
 });
